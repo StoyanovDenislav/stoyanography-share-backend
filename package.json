@@ -1,0 +1,51 @@
+{
+  "name": "stoyanography-share-backend",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "cross-env NODE_ENV=production nodemon app.js",
+    "dev": "cross-env NODE_ENV=development nodemon app.js",
+    "init-db": "node scripts/initDb.js",
+    "init-db-complete": "node scripts/initDbComplete.js",
+    "test-auth": "node scripts/testAuth.js",
+    "cleanup-collections": "node scripts/cleanupCollections.js",
+    "cleanup-tokens": "node scripts/cleanupTokens.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.5.0",
+    "bcrypt": "^5.1.1",
+    "cookie-parser": "^1.4.6",
+    "cookies": "^0.9.1",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "csrf": "^3.1.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.4",
+    "express-validator": "^7.2.1",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "memfs": "^4.6.0",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^4.2.1",
+    "node-localstorage": "^3.0.5",
+    "node-sessionstorage": "^1.0.0",
+    "nodemailer": "^6.9.15",
+    "nodemon": "^3.0.1",
+    "orientjs": "^3.2.0",
+    "qrcode": "^1.5.3",
+    "sharp": "^0.33.0",
+    "speakeasy": "^2.0.0",
+    "store": "^2.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "cross-env": "^7.0.3"
+  }
+}

@@ -1,0 +1,1310 @@
+const bcrypt = require("bcrypt");
+const { body, validationResult } = require("express-validator");
+const Database = require("../Database/databaseClass");
+const { generateToken } = require("../middleware/auth");
+const EncryptionService = require("./encryptionService");
+const EmailService = require("./emailService");
+const EnhancedPhotoService = require("./enhancedPhotoService");
+const UserCredentials = require("../UserManagement/generateUserCredentials");
+const { now, toOrientDBDateTime } = require("../utils/dateFormatter");
+const nodemailer = require("nodemailer");
+const { v4: uuidv4 } = require("uuid");
+
+class PhotographerService {
+  constructor() {
+    this.dbInstance = new Database(
+      process.env.DB_HOST,
+      process.env.DB_PORT,
+      process.env.DB_USERNAME,
+      process.env.DB_PASSWORD
+    );
+    this.encryption = new EncryptionService();
+    this.emailService = new EmailService();
+    this.photoService = new EnhancedPhotoService();
+    this.userCredentials = new UserCredentials();
+  }
+
+  // Validation for photographer creation (admin only)
+  static getPhotographerValidation() {
+    return [
+      body("email")
+        .isEmail()
+        .withMessage("Please provide a valid email address")
+        .normalizeEmail(),
+      body("businessName")
+        .isLength({ min: 2, max: 100 })
+        .withMessage("Business name must be between 2 and 100 characters"),
+      body("username")
+        .optional()
+        .isLength({ min: 3, max: 30 })
+        .withMessage("Username must be between 3 and 30 characters"),
+    ];
+  }
+
+  // Validation for client creation (photographer only)
+  static getClientValidation() {
+    return [
+      body("email")
+        .isEmail()
+        .withMessage("Please provide a valid email address")
+        .normalizeEmail(),
+      body("clientName")
+        .isLength({ min: 2, max: 100 })
+        .withMessage("Client name must be between 2 and 100 characters"),
+    ];
+  }
+
+  async createPhotographer(req, res) {
+    try {
+      // Only admin can create photographers
+      if (req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Only administrators can create photographer accounts",
+        });
+      }
+
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const { email, businessName, username } = req.body;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Check if photographer already exists
+      const existingPhotographer = await db.query(
+        "SELECT FROM Photographer WHERE email = :email",
+        { params: { email } }
+      );
+
+      if (existingPhotographer.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Photographer with this email already exists",
+        });
+      }
+
+      // Generate credentials
+      const generatedUsername =
+        username || this.userCredentials.generateUserCode();
+      const password = await this.userCredentials.generateSecurePassword(12);
+      const hashedPassword = await bcrypt.hash(password, 12);
+      const photographerId = uuidv4();
+
+      // Create photographer
+      const result = await db.query(
+        `
+        INSERT INTO Photographer SET 
+        photographerId = :photographerId,
+        username = :username,
+        email = :email,
+        password = :password,
+        businessName = :businessName,
+        role = 'photographer',
+        createdAt = :createdAt,
+        isActive = true,
+        createdBy = :createdBy
+      `,
+        {
+          params: {
+            photographerId,
+            username: generatedUsername,
+            email: email,
+            password: hashedPassword,
+            businessName: businessName,
+            createdAt: now(),
+            createdBy: req.user.userId,
+          },
+        }
+      );
+
+      // Send credentials via email
+      try {
+        await this.emailService.sendPhotographerCredentials(email, {
+          username: generatedUsername,
+          password: password,
+          businessName: businessName,
+        });
+      } catch (emailError) {
+        console.error("Failed to send credentials email:", emailError);
+        // Continue even if email fails - we still return credentials in response
+      }
+
+      res.status(201).json({
+        success: true,
+        message:
+          "Photographer created successfully and credentials sent via email",
+        photographer: {
+          id: result[0]["@rid"],
+          username: generatedUsername,
+          businessName: businessName,
+        },
+        credentials: {
+          username: generatedUsername,
+          password: password,
+        },
+        note: "Credentials have been sent to the photographer's email address.",
+      });
+    } catch (error) {
+      console.error("Create photographer error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to create photographer",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async createClient(req, res) {
+    try {
+      // Only photographers can create clients
+      if (req.user.role !== "photographer") {
+        return res.status(403).json({
+          success: false,
+          message: "Only photographers can create client accounts",
+        });
+      }
+
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const { email, clientName } = req.body;
+      const photographerId = req.user.photographerId || req.user.userId;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Check if client already exists for this photographer (by encrypted email for privacy)
+      const encryptedEmailToCheck = this.encryption.encryptSimple(email);
+      const existingClient = await db.query(
+        "SELECT FROM Client WHERE encryptedEmail = :encryptedEmail AND photographerId = :photographerId",
+        { params: { encryptedEmail: encryptedEmailToCheck, photographerId } }
+      );
+
+      if (existingClient.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Client with this email already exists for your account",
+        });
+      }
+
+      // Generate credentials
+      const username = this.userCredentials.generateUserCode();
+      const password = await this.userCredentials.generateSecurePassword(12);
+      const hashedPassword = await bcrypt.hash(password, 12);
+      const encryptedEmail = this.encryption.encryptSimple(email);
+
+      // Create client - IMPORTANT: We do NOT store the plain email for privacy
+      const result = await db.query(
+        `
+        INSERT INTO Client SET 
+        username = :username,
+        encryptedEmail = :encryptedEmail,
+        password = :password,
+        clientName = :clientName,
+        role = 'client',
+        photographerId = :photographerId,
+        createdAt = :createdAt,
+        isActive = true,
+        notificationSent = false
+      `,
+        {
+          params: {
+            username: username,
+            encryptedEmail: encryptedEmail,
+            password: hashedPassword,
+            clientName: clientName,
+            photographerId: photographerId,
+            createdAt: now(),
+          },
+        }
+      );
+
+      // Get photographer info for email
+      const photographerInfo = await db.query(
+        "SELECT businessName, username FROM Photographer WHERE photographerId = :photographerId",
+        { params: { photographerId: photographerId } }
+      );
+
+      // Send credentials via email (email NOT stored in database)
+      const emailResult = await this.emailService.sendClientCredentials(
+        email, // This email is only used for sending, not stored
+        {
+          username: username,
+          password: password,
+        },
+        photographerInfo[0] || {
+          businessName: "Photography Studio",
+          username: "photographer",
+        }
+      );
+
+      // Send credentials via email
+      // await this.sendClientCredentialsEmail(email, username, password, clientName);
+
+      res.status(201).json({
+        success: true,
+        message: "Client created successfully and credentials sent via email",
+        client: {
+          id: result[0]["@rid"],
+          username: username,
+          clientName: clientName,
+          // Email not included in response for privacy
+          emailSent: emailResult.success,
+        },
+        credentials: {
+          username: username,
+          password: password,
+        },
+      });
+    } catch (error) {
+      console.error("Create client error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to create client",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async getClients(req, res) {
+    try {
+      if (req.user.role !== "photographer" && req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied",
+        });
+      }
+
+      const photographerId = req.user.photographerId || req.user.userId;
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      let query = `
+        SELECT clientId as id, username, email, clientName, createdAt, lastLogin, isActive
+        FROM Client 
+        WHERE isActive = true
+      `;
+
+      const params = {};
+
+      if (req.user.role === "photographer") {
+        query += ` AND photographerId = :photographerId`;
+        params.photographerId = photographerId;
+      }
+
+      query += ` ORDER BY createdAt DESC`;
+
+      const clients = await db.query(query, { params });
+
+      res.json({
+        success: true,
+        clients: clients,
+      });
+    } catch (error) {
+      console.error("Get clients error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve clients",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async sharePhotosWithClient(req, res) {
+    try {
+      if (req.user.role !== "photographer") {
+        return res.status(403).json({
+          success: false,
+          message: "Only photographers can share photos with clients",
+        });
+      }
+
+      const { clientId, photoIds, accessType = "view" } = req.body;
+
+      if (!clientId || !photoIds || !Array.isArray(photoIds)) {
+        return res.status(400).json({
+          success: false,
+          message: "Client ID and photo IDs array are required",
+        });
+      }
+
+      const photographerId = req.user.photographerId || req.user.userId;
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Verify client belongs to this photographer using UUID
+      const clients = await db.query(
+        `SELECT clientId FROM Client 
+         WHERE clientId = :clientId AND photographerId = :photographerId AND isActive = true`,
+        { params: { clientId, photographerId } }
+      );
+
+      if (clients.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Client not found or not accessible",
+        });
+      }
+
+      // Verify photos belong to this photographer using UUIDs
+      const photos = await db.query(
+        `SELECT photoId FROM Photo 
+         WHERE photoId IN :photoIds AND photographerId = :photographerId AND isActive = true`,
+        { params: { photoIds, photographerId } }
+      );
+
+      if (photos.length !== photoIds.length) {
+        return res.status(400).json({
+          success: false,
+          message: "Some photos not found or not accessible",
+        });
+      }
+
+      // Get client RID for edge creation
+      const clientVertex = await db.query(
+        `SELECT @rid FROM Client WHERE clientId = :clientId`,
+        { params: { clientId } }
+      );
+
+      if (clientVertex.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Client vertex not found",
+        });
+      }
+
+      const clientRid = clientVertex[0]["@rid"];
+      let sharedCount = 0;
+      let alreadySharedCount = 0;
+
+      // Create PhotoAccess edges for each photo
+      for (const photoId of photoIds) {
+        // Get photo RID
+        const photoVertex = await db.query(
+          `SELECT @rid FROM Photo WHERE photoId = :photoId`,
+          { params: { photoId } }
+        );
+
+        if (photoVertex.length === 0) {
+          continue;
+        }
+
+        const photoRid = photoVertex[0]["@rid"];
+
+        // Check if edge already exists
+        const existingAccess = await db.query(
+          `SELECT FROM PhotoAccess 
+           WHERE in.clientId = :clientId AND out.photoId = :photoId`,
+          { params: { clientId, photoId } }
+        );
+
+        if (existingAccess.length === 0) {
+          // Create edge from client to photo
+          await db.query(
+            `CREATE EDGE PhotoAccess FROM ${clientRid} TO ${photoRid} SET 
+             accessType = :accessType,
+             grantedAt = sysdate(),
+             isActive = true`,
+            { params: { accessType } }
+          );
+          sharedCount++;
+        } else {
+          // Update existing edge
+          await db.query(
+            `UPDATE PhotoAccess SET 
+             accessType = :accessType,
+             isActive = true
+             WHERE in.clientId = :clientId AND out.photoId = :photoId`,
+            { params: { accessType, clientId, photoId } }
+          );
+          alreadySharedCount++;
+        }
+      }
+
+      res.json({
+        success: true,
+        message: `Successfully processed ${photoIds.length} photos`,
+        details: {
+          totalPhotos: photoIds.length,
+          newlyShared: sharedCount,
+          updated: alreadySharedCount,
+        },
+      });
+    } catch (error) {
+      console.error("Share photos error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to share photos with client",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async createPhotoGroup(req, res) {
+    try {
+      if (req.user.role !== "photographer") {
+        return res.status(403).json({
+          success: false,
+          message: "Only photographers can create photo groups",
+        });
+      }
+
+      const { groupName, description, photoIds, clientIds } = req.body;
+
+      if (!groupName || !photoIds || !Array.isArray(photoIds)) {
+        return res.status(400).json({
+          success: false,
+          message: "Group name and photo IDs array are required",
+        });
+      }
+
+      const photographerId = req.user.photographerId || req.user.userId;
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Create photo group
+      const result = await db.query(
+        `
+        INSERT INTO PhotoGroup SET 
+        groupName = :groupName,
+        description = :description,
+        photographerId = :photographerId,
+        createdAt = :createdAt,
+        isActive = true,
+        photoIds = :photoIds,
+        clientIds = :clientIds
+      `,
+        {
+          params: {
+            groupName: groupName,
+            description: description || "",
+            photographerId: photographerId,
+            createdAt: now(),
+            photoIds: photoIds,
+            clientIds: clientIds || [],
+          },
+        }
+      );
+
+      // If clients are specified, grant access to all photos in the group
+      if (clientIds && clientIds.length > 0) {
+        for (const clientId of clientIds) {
+          for (const photoId of photoIds) {
+            try {
+              await db.query(
+                `
+                INSERT INTO PhotoAccess SET 
+                photoId = :photoId,
+                userId = :clientId,
+                userType = 'client',
+                accessType = 'view',
+                grantedBy = :photographerId,
+                grantedAt = :grantedAt,
+                isActive = true
+              `,
+                {
+                  params: {
+                    photoId: photoId,
+                    clientId: clientId,
+                    photographerId: photographerId,
+                    grantedAt: new Date().toISOString(),
+                  },
+                }
+              );
+            } catch (e) {
+              // Access might already exist, ignore duplicates
+              if (!e.message.includes("duplicate")) {
+                console.warn("Failed to grant access:", e.message);
+              }
+            }
+          }
+        }
+      }
+
+      res.status(201).json({
+        success: true,
+        message: "Photo group created successfully",
+        group: {
+          id: result[0]["@rid"],
+          groupName: groupName,
+          description: description,
+          photoCount: photoIds.length,
+          clientCount: clientIds ? clientIds.length : 0,
+        },
+      });
+    } catch (error) {
+      console.error("Create photo group error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to create photo group",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async getPhotoGroups(req, res) {
+    try {
+      if (req.user.role !== "photographer") {
+        return res.status(403).json({
+          success: false,
+          message: "Only photographers can view photo groups",
+        });
+      }
+
+      const photographerId = req.user.photographerId || req.user.userId;
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      const groups = await db.query(
+        `
+        SELECT @rid as id, groupName, description, createdAt, photoIds, clientIds
+        FROM PhotoGroup 
+        WHERE photographerId = :photographerId AND isActive = true
+        ORDER BY createdAt DESC
+      `,
+        {
+          params: { photographerId },
+        }
+      );
+
+      res.json({
+        success: true,
+        groups: groups.map((group) => ({
+          id: group.id,
+          groupName: group.groupName,
+          description: group.description,
+          createdAt: group.createdAt,
+          photoCount: group.photoIds ? group.photoIds.length : 0,
+          clientCount: group.clientIds ? group.clientIds.length : 0,
+        })),
+      });
+    } catch (error) {
+      console.error("Get photo groups error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve photo groups",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  // Admin methods
+  async getAllPhotographers(req, res) {
+    try {
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      const photographers = await db.query(
+        "SELECT username, businessName, createdAt, isActive, photographerId as id FROM Photographer ORDER BY createdAt DESC"
+      );
+
+      res.json({
+        success: true,
+        photographers: photographers.map((p) => ({
+          id: p.id,
+          username: p.username,
+          businessName: p.businessName,
+          createdAt: p.createdAt,
+          isActive: p.isActive !== false, // Default to true if not set
+        })),
+      });
+    } catch (error) {
+      console.error("Get all photographers error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve photographers",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async togglePhotographerStatus(req, res) {
+    try {
+      const { photographerId } = req.params;
+      console.log("🔄 Toggling photographer status for:", photographerId);
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Get current photographer
+      const photographer = await db.query(
+        "SELECT isActive FROM Photographer WHERE photographerId = :photographerId",
+        { params: { rid: photographerId } }
+      );
+
+      if (photographer.length === 0) {
+        console.log("❌ Photographer not found:", photographerId);
+        return res.status(404).json({
+          success: false,
+          message: "Photographer not found",
+        });
+      }
+
+      const currentStatus = photographer[0].isActive !== false;
+      const newStatus = !currentStatus;
+
+      console.log("   Current status:", currentStatus);
+      console.log("   New status:", newStatus);
+
+      // Toggle status
+      await db.query(
+        "UPDATE Photographer SET isActive = :isActive WHERE photographerId = :photographerId",
+        {
+          params: {
+            isActive: newStatus,
+            rid: photographerId,
+          },
+        }
+      );
+
+      console.log("✅ Photographer status toggled successfully");
+
+      res.json({
+        success: true,
+        message: `Photographer ${
+          newStatus ? "activated" : "deactivated"
+        } successfully`,
+        isActive: newStatus,
+      });
+    } catch (error) {
+      console.error("❌ Toggle photographer status error:", error);
+      console.error("   Error message:", error.message);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update photographer status",
+        error: error.message,
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async getPhotographerStats(req, res) {
+    try {
+      const { photographerId } = req.params;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Get photographer info
+      const photographer = await db.query(
+        "SELECT username, businessName, createdAt FROM Photographer WHERE photographerId = :photographerId",
+        { params: { rid: photographerId } }
+      );
+
+      if (photographer.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Photographer not found",
+        });
+      }
+
+      // Get client count
+      const clients = await db.query(
+        "SELECT count(*) as count FROM Client WHERE photographerId = :pid",
+        { params: { pid: photographerId } }
+      );
+
+      // Get photo count
+      const photos = await db.query(
+        "SELECT count(*) as count FROM Photo WHERE photographerId = :pid",
+        { params: { pid: photographerId } }
+      );
+
+      res.json({
+        success: true,
+        stats: {
+          photographer: photographer[0],
+          clientCount: clients[0]?.count || 0,
+          photoCount: photos[0]?.count || 0,
+        },
+      });
+    } catch (error) {
+      console.error("Get photographer stats error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve photographer statistics",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async deletePhotographer(req, res) {
+    try {
+      const { photographerId } = req.params;
+      console.log("🗑️  Deleting photographer:", photographerId);
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Check if photographer exists
+      const photographer = await db.query(
+        "SELECT FROM Photographer WHERE photographerId = :photographerId",
+        { params: { rid: photographerId } }
+      );
+
+      if (photographer.length === 0) {
+        console.log("❌ Photographer not found:", photographerId);
+        return res.status(404).json({
+          success: false,
+          message: "Photographer not found",
+        });
+      }
+
+      console.log("   Found photographer:", photographer[0].businessName);
+
+      // Delete photographer using DELETE VERTEX (OrientDB proper way)
+      await db.query("DELETE VERTEX Photographer WHERE photographerId = :photographerId", {
+        params: { rid: photographerId },
+      });
+
+      console.log("✅ Photographer deleted successfully");
+
+      res.json({
+        success: true,
+        message: "Photographer deleted successfully",
+      });
+    } catch (error) {
+      console.error("❌ Delete photographer error:", error);
+      console.error("   Error message:", error.message);
+      res.status(500).json({
+        success: false,
+        message: "Failed to delete photographer",
+        error: error.message,
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  // Collection Management Methods
+
+  async createCollection(req, res) {
+    try {
+      const { name, description } = req.body;
+      const photographerId = req.user.userId || req.user.photographerId;
+
+      if (!name) {
+        return res.status(400).json({
+          success: false,
+          message: "Collection name is required",
+        });
+      }
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Create collection class if it doesn't exist
+      try {
+        await db.query("CREATE CLASS PhotoCollection EXTENDS V");
+      } catch (e) {
+        // Class might already exist
+      }
+
+      const result = await db.query(
+        `INSERT INTO PhotoCollection SET 
+         photographerId = :photographerId,
+         name = :name,
+         description = :description,
+         createdAt = :createdAt,
+         isActive = true`,
+        {
+          params: {
+            photographerId,
+            name,
+            description: description || "",
+            createdAt: now(),
+          },
+        }
+      );
+
+      res.status(201).json({
+        success: true,
+        message: "Collection created successfully",
+        collection: {
+          id: result[0]["@rid"],
+          name,
+          description: description || "",
+          createdAt: now(),
+        },
+      });
+    } catch (error) {
+      console.error("Create collection error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to create collection",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async getCollections(req, res) {
+    try {
+      const photographerId = req.user.userId || req.user.photographerId;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Try to get collections, create class if it doesn't exist
+      let collections = [];
+      try {
+        collections = await db.query(
+          `SELECT collectionId as id, name, description, createdAt
+           FROM PhotoCollection 
+           WHERE photographerId = :photographerId AND isActive = true
+           ORDER BY createdAt DESC`,
+          {
+            params: { photographerId },
+          }
+        );
+
+        // Get photo counts separately to avoid circular reference issues
+        for (const collection of collections) {
+          const photoCount = await db.query(
+            `SELECT count(*) as count FROM Photo WHERE collectionId = :collectionId AND isActive = true`,
+            {
+              params: { collectionId: collection.id },
+            }
+          );
+          collection.photoCount = photoCount[0]?.count || 0;
+        }
+      } catch (e) {
+        if (e.message.includes("not found")) {
+          // Class doesn't exist yet, return empty array
+          collections = [];
+        } else {
+          throw e;
+        }
+      }
+
+      res.json({
+        success: true,
+        collections: collections.map((c) => ({
+          id: c.id,
+          name: c.name,
+          description: c.description,
+          createdAt: c.createdAt,
+          photoCount: c.photoCount || 0,
+        })),
+      });
+    } catch (error) {
+      console.error("Get collections error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve collections",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async updateCollection(req, res) {
+    try {
+      const { collectionId } = req.params;
+      const { name, description } = req.body;
+      const photographerId = req.user.userId || req.user.photographerId;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Verify ownership
+      const collection = await db.query(
+        `SELECT photographerId FROM PhotoCollection WHERE collectionId = :collectionId`,
+        { params: { collectionId } }
+      );
+
+      if (
+        collection.length === 0 ||
+        collection[0].photographerId !== photographerId
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied",
+        });
+      }
+
+      await db.query(
+        `UPDATE PhotoCollection SET name = :name, description = :description 
+         WHERE collectionId = :collectionId`,
+        {
+          params: {
+            collectionId,
+            name,
+            description: description || "",
+          },
+        }
+      );
+
+      res.json({
+        success: true,
+        message: "Collection updated successfully",
+      });
+    } catch (error) {
+      console.error("Update collection error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update collection",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async deleteCollection(req, res) {
+    try {
+      const { collectionId } = req.params;
+      const photographerId = req.user.userId || req.user.photographerId;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Verify ownership
+      const collection = await db.query(
+        `SELECT photographerId FROM PhotoCollection WHERE collectionId = :collectionId`,
+        { params: { collectionId } }
+      );
+
+      if (
+        collection.length === 0 ||
+        collection[0].photographerId !== photographerId
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied",
+        });
+      }
+
+      // Soft delete - mark collection as inactive
+      await db.query(
+        `UPDATE PhotoCollection SET isActive = false WHERE collectionId = :collectionId`,
+        { params: { collectionId } }
+      );
+
+      // Remove collection reference from photos
+      await db.query(
+        `UPDATE Photo SET collectionId = null WHERE collectionId = :collectionId`,
+        { params: { collectionId } }
+      );
+
+      res.json({
+        success: true,
+        message: "Collection deleted successfully",
+      });
+    } catch (error) {
+      console.error("Delete collection error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to delete collection",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async addPhotosToCollection(req, res) {
+    try {
+      const { collectionId } = req.params;
+      const { photoIds } = req.body;
+      const photographerId = req.user.userId || req.user.photographerId;
+
+      if (!Array.isArray(photoIds) || photoIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "photoIds must be a non-empty array",
+        });
+      }
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Verify collection ownership
+      const collection = await db.query(
+        `SELECT photographerId FROM PhotoCollection WHERE collectionId = :collectionId`,
+        { params: { collectionId } }
+      );
+
+      if (
+        collection.length === 0 ||
+        collection[0].photographerId !== photographerId
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied to collection",
+        });
+      }
+
+      // Add photos to collection
+      for (const photoId of photoIds) {
+        await db.query(
+          `UPDATE Photo SET collectionId = :collectionId WHERE photoId = :photoId AND photographerId = :photographerId`,
+          {
+            params: {
+              collectionId,
+              photoId,
+              photographerId,
+            },
+          }
+        );
+      }
+
+      res.json({
+        success: true,
+        message: `${photoIds.length} photo(s) added to collection`,
+      });
+    } catch (error) {
+      console.error("Add photos to collection error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to add photos to collection",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async removePhotoFromCollection(req, res) {
+    try {
+      const { collectionId, photoId } = req.params;
+      const photographerId = req.user.userId || req.user.photographerId;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      await db.query(
+        `UPDATE Photo SET collectionId = null 
+         WHERE photoId = :photoId AND collectionId = :collectionId AND photographerId = :photographerId`,
+        {
+          params: {
+            photoId,
+            collectionId,
+            photographerId,
+          },
+        }
+      );
+
+      res.json({
+        success: true,
+        message: "Photo removed from collection",
+      });
+    } catch (error) {
+      console.error("Remove photo from collection error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to remove photo from collection",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async shareCollectionWithClient(req, res) {
+    try {
+      const { collectionId } = req.params;
+      const { clientId } = req.body;
+      const photographerId = req.user.userId || req.user.photographerId;
+
+      console.log("=== Share Collection with Client ===");
+      console.log("Collection ID:", collectionId);
+      console.log("Client ID:", clientId);
+      console.log("Photographer ID:", photographerId);
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Verify collection exists and belongs to photographer
+      const collection = await db.query(
+        `SELECT collectionId, photographerId FROM PhotoCollection 
+         WHERE collectionId = :collectionId`,
+        { params: { collectionId } }
+      );
+
+      if (collection.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Collection not found",
+        });
+      }
+
+      if (collection[0].photographerId !== photographerId) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied to collection",
+        });
+      }
+
+      // Verify client exists and belongs to photographer
+      const client = await db.query(
+        `SELECT clientId, photographerId FROM Client 
+         WHERE clientId = :clientId AND isActive = true`,
+        { params: { clientId } }
+      );
+
+      if (client.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Client not found",
+        });
+      }
+
+      if (client[0].photographerId !== photographerId) {
+        return res.status(403).json({
+          success: false,
+          message: "Cannot share with client belonging to another photographer",
+        });
+      }
+
+      // Get all photos in the collection
+      const photos = await db.query(
+        `SELECT photoId FROM Photo 
+         WHERE collectionId = :collectionId AND isActive = true`,
+        { params: { collectionId } }
+      );
+
+      if (photos.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Collection has no photos to share",
+        });
+      }
+
+      console.log(`Found ${photos.length} photos in collection to share`);
+
+      // Share each photo with the client
+      let sharedCount = 0;
+      let alreadySharedCount = 0;
+
+      for (const photo of photos) {
+        // Check if PhotoAccess edge already exists using UUIDs
+        const existingAccess = await db.query(
+          `SELECT FROM PhotoAccess 
+           WHERE in.clientId = :clientId AND out.photoId = :photoId`,
+          { params: { clientId, photoId: photo.photoId } }
+        );
+
+        if (existingAccess.length === 0) {
+          // Get the actual RID of the client vertex
+          const clientVertex = await db.query(
+            `SELECT @rid FROM Client WHERE clientId = :clientId`,
+            { params: { clientId } }
+          );
+
+          // Get the actual RID of the photo vertex
+          const photoVertex = await db.query(
+            `SELECT @rid FROM Photo WHERE photoId = :photoId`,
+            { params: { photoId: photo.photoId } }
+          );
+
+          if (clientVertex.length > 0 && photoVertex.length > 0) {
+            // Create edge using RIDs
+            await db.query(
+              `CREATE EDGE PhotoAccess FROM ${clientVertex[0]["@rid"]} TO ${photoVertex[0]["@rid"]} SET 
+               grantedAt = sysdate(), 
+               isActive = true,
+               accessType = 'collection'`
+            );
+            sharedCount++;
+          }
+        } else {
+          alreadySharedCount++;
+        }
+      }
+
+      console.log(`Successfully shared collection: ${sharedCount} new, ${alreadySharedCount} already shared`);
+
+      res.json({
+        success: true,
+        message: `Collection shared with client`,
+        details: {
+          totalPhotos: photos.length,
+          newlyShared: sharedCount,
+          alreadyShared: alreadySharedCount,
+        },
+      });
+    } catch (error) {
+      console.error("Share collection error:", error);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to share collection",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+}
+
+module.exports = PhotographerService;

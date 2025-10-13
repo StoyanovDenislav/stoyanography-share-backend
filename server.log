@@ -1,0 +1,51 @@
+
+> stoyanography-share-backend@1.0.0 dev
+> cross-env NODE_ENV=development nodemon app.js
+
+[33m[nodemon] 3.1.10[39m
+[33m[nodemon] to restart at any time, enter `rs`[39m
+[33m[nodemon] watching path(s): *.*[39m
+[33m[nodemon] watching extensions: js,mjs,cjs,json[39m
+[32m[nodemon] starting `node app.js`[39m
+📧 Email Service Configuration:
+   SMTP Host: smtp.zoho.eu
+   SMTP Port: 465
+   User: support@stoyanography.com
+   Password configured: true
+   Password length: 14
+   Password (DEV): vseh FqzK Gsyi
+📧 Email Service Configuration:
+   SMTP Host: smtp.zoho.eu
+   SMTP Port: 465
+   User: support@stoyanography.com
+   Password configured: true
+   Password length: 14
+   Password (DEV): vseh FqzK Gsyi
+📧 Email Service Configuration:
+   SMTP Host: smtp.zoho.eu
+   SMTP Port: 465
+   User: support@stoyanography.com
+   Password configured: true
+   Password length: 14
+   Password (DEV): vseh FqzK Gsyi
+node:events:486
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use 0.0.0.0:9001
+    at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+    at listenInCluster (node:net:1997:12)
+    at node:net:2206:7
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1976:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '0.0.0.0',
+  port: 9001
+}
+
+Node.js v24.9.0
+[31m[nodemon] app crashed - waiting for file changes before starting...[39m

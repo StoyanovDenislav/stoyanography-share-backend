@@ -1,0 +1,724 @@
+const bcrypt = require("bcrypt");
+const { body, validationResult } = require("express-validator");
+const Database = require("../Database/databaseClass");
+const { generateToken, setTokenCookie } = require("../middleware/auth");
+const EncryptionService = require("./encryptionService");
+const EmailService = require("./emailService");
+const UserCredentials = require("../UserManagement/generateUserCredentials");
+
+class ClientService {
+  constructor() {
+    this.dbInstance = new Database(
+      process.env.DB_HOST,
+      process.env.DB_PORT,
+      process.env.DB_USERNAME,
+      process.env.DB_PASSWORD
+    );
+    this.encryption = new EncryptionService();
+    this.emailService = new EmailService();
+    this.userCredentials = new UserCredentials();
+  }
+
+  // Validation for guest creation
+  static getGuestValidation() {
+    return [
+      body("email")
+        .isEmail()
+        .withMessage("Please provide a valid email address")
+        .normalizeEmail(),
+      body("guestName")
+        .isLength({ min: 2, max: 100 })
+        .withMessage("Guest name must be between 2 and 100 characters"),
+      body("photoIds")
+        .isArray({ min: 1 })
+        .withMessage("At least one photo must be selected"),
+      body("expirationDays")
+        .optional()
+        .isInt({ min: 1, max: 30 })
+        .withMessage("Expiration must be between 1 and 30 days"),
+    ];
+  }
+
+  async authenticateClient(username, password) {
+    const db = this.dbInstance.useDatabase(
+      process.env.DB_NAME,
+      process.env.DB_USERNAME,
+      process.env.DB_PASSWORD
+    );
+
+    try {
+      // Find client by username
+      const clients = await db.query(
+        "SELECT FROM Client WHERE username = :username AND isActive = true",
+        { params: { username } }
+      );
+
+      if (clients.length === 0) {
+        throw new Error("Invalid credentials");
+      }
+
+      const client = clients[0];
+
+      // Verify password
+      const isValidPassword = await bcrypt.compare(password, client.password);
+
+      if (!isValidPassword) {
+        throw new Error("Invalid credentials");
+      }
+
+      // Update last login
+      await db.query(
+        "UPDATE Client SET lastLogin = :lastLogin WHERE clientId = :clientId",
+        {
+          params: {
+            lastLogin: new Date().toISOString(),
+            clientId: client.clientId,
+          },
+        }
+      );
+
+      // Return client without password and without email for privacy
+      return {
+        id: client.clientId,
+        username: client.username,
+        clientName: client.clientName,
+        photographerId: client.photographerId,
+        createdAt: client.createdAt,
+        lastLogin: new Date().toISOString(),
+        role: "client",
+      };
+    } catch (error) {
+      throw error;
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async login(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const { username, password } = req.body;
+
+      // Authenticate client
+      const client = await this.authenticateClient(username, password);
+
+      // Generate JWT token
+      const token = generateToken({
+        userId: client.id,
+        clientId: client.id,
+        username: client.username,
+        email: client.email,
+        role: client.role,
+        photographerId: client.photographerId,
+      });
+
+      // Set token in secure cookie
+      setTokenCookie(res, token);
+
+      res.json({
+        success: true,
+        message: "Login successful",
+        client: {
+          id: client.id,
+          username: client.username,
+          email: client.email,
+          clientName: client.clientName,
+          lastLogin: client.lastLogin,
+        },
+      });
+    } catch (error) {
+      console.error("Client login error:", error);
+      res.status(401).json({
+        success: false,
+        message: error.message || "Login failed",
+      });
+    }
+  }
+
+  // Get all photos shared with this client
+  async getClientPhotos(req, res) {
+    const db = this.dbInstance.useDatabase(
+      process.env.DB_NAME,
+      process.env.DB_USERNAME,
+      process.env.DB_PASSWORD
+    );
+
+    try {
+      const clientId = req.user.id;
+
+      // Get all photos shared with this client via PhotoAccess edges
+      const query = `
+        SELECT 
+          out.clientId as id,
+          out.filename as filename,
+          out.originalName as originalName,
+          out.size as size,
+          out.width as width,
+          out.height as height,
+          out.uploadedAt as uploadedAt,
+          out.tags as tags,
+          out.thumbnailDataB64 as thumbnailDataB64
+        FROM PhotoAccess 
+        WHERE in = :clientId 
+          AND out.isActive = true
+        ORDER BY out.uploadedAt DESC
+      `;
+
+      const photos = await db.query(query, { clientId });
+
+      res.status(200).json({
+        success: true,
+        photos: photos.map((p) => ({
+          id: p.id,
+          filename: p.filename,
+          originalName: p.originalName,
+          size: p.size,
+          width: p.width,
+          height: p.height,
+          uploadedAt: p.uploadedAt,
+          tags: p.tags,
+          thumbnailDataB64: p.thumbnailDataB64,
+        })),
+      });
+    } catch (error) {
+      console.error("Get client photos error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to retrieve photos",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  // Get all guests created by this client
+  async getClientGuests(req, res) {
+    const db = this.dbInstance.useDatabase(
+      process.env.DB_NAME,
+      process.env.DB_USERNAME,
+      process.env.DB_PASSWORD
+    );
+
+    try {
+      const clientId = req.user.id;
+
+      // Get all guests created by this client
+      const query = `
+        SELECT 
+          @rid as id,
+          username,
+          guestName,
+          isActive,
+          expiresAt,
+          createdAt
+        FROM Guest 
+        WHERE clientId = :clientId
+        ORDER BY createdAt DESC
+      `;
+
+      const guests = await db.query(query, { clientId });
+
+      // Get photo count for each guest
+      const guestsWithCounts = await Promise.all(
+        guests.map(async (guest) => {
+          const photoCountQuery = `
+            SELECT count(*) as count 
+            FROM GuestAccess 
+            WHERE in = :guestId
+          `;
+
+          const photoCountResult = await db.query(photoCountQuery, {
+            guestId: guest.id,
+          });
+
+          return {
+            id: guest.id,
+            username: guest.username,
+            guestName: guest.guestName,
+            isActive: guest.isActive,
+            expiresAt: guest.expiresAt,
+            createdAt: guest.createdAt,
+            sharedPhotoCount: photoCountResult[0]?.count || 0,
+          };
+        })
+      );
+
+      res.status(200).json({
+        success: true,
+        guests: guestsWithCounts,
+      });
+    } catch (error) {
+      console.error("Get client guests error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to retrieve guests",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async getAccessiblePhotos(req, res) {
+    try {
+      const { page = 1, limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
+      const clientId = req.user.clientId || req.user.userId;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Get photos accessible to this client
+      const accessiblePhotos = await db.query(
+        `
+        SELECT p.photoId as id, p.filename, p.originalName, p.size, p.width, p.height, 
+               p.shareToken, p.uploadedAt, p.tags, p.thumbnailDataB64, pa.accessType
+        FROM Photo p, PhotoAccess pa
+        WHERE p.photoId = pa.out.photoId 
+        AND pa.userId = :clientId 
+        AND pa.userType = 'client'
+        AND pa.isActive = true 
+        AND p.isActive = true
+        ORDER BY p.uploadedAt DESC
+        SKIP :offset LIMIT :limit
+      `,
+        {
+          params: {
+            clientId: clientId,
+            offset: offset,
+            limit: parseInt(limit),
+          },
+        }
+      );
+
+      const photosWithThumbnails = accessiblePhotos.map((photo) => ({
+        id: photo.id,
+        filename: photo.filename,
+        originalName: photo.originalName,
+        size: photo.size,
+        width: photo.width,
+        height: photo.height,
+        shareToken: photo.shareToken,
+        uploadedAt: photo.uploadedAt,
+        tags: photo.tags || [],
+        accessType: photo.accessType,
+        thumbnail: `data:image/jpeg;base64,${photo.thumbnailDataB64}`,
+        canShare:
+          photo.accessType === "share" || photo.accessType === "download",
+      }));
+
+      res.json({
+        success: true,
+        photos: photosWithThumbnails,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: accessiblePhotos.length,
+        },
+      });
+    } catch (error) {
+      console.error("Get accessible photos error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve photos",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  async createGuest(req, res) {
+    try {
+      if (req.user.role !== "client") {
+        return res.status(403).json({
+          success: false,
+          message: "Only clients can create guest accounts",
+        });
+      }
+
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const { email, guestName, photoIds, expirationDays = 7 } = req.body;
+      const clientId = req.user.clientId || req.user.userId;
+
+      const db = this.dbInstance.useDatabase(
+        process.env.DB_NAME,
+        process.env.DB_USERNAME,
+        process.env.DB_PASSWORD
+      );
+
+      // Verify client has access to the photos they want to share
+      const clientPhotos = await db.query(
+        `
+        SELECT pa.photoId
+        FROM PhotoAccess pa
+        WHERE pa.userId = :clientId 
+        AND pa.userType = 'client'
+        AND pa.photoId IN :photoIds
+        AND pa.isActive = true
+        AND (pa.accessType = 'share' OR pa.accessType = 'download')
+      `,
+        {
+          params: {
+            clientId: clientId,
+            photoIds: photoIds,
+          },
+        }
+      );
+
+      if (clientPhotos.length !== photoIds.length) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "You do not have sharing permission for some of the selected photos",
+        });
+      }
+
+      // Check if guest already exists for this client (by encrypted email for privacy)
+      const encryptedEmailToCheck = this.encryption.encryptSimple(email);
+      const existingGuest = await db.query(
+        "SELECT FROM Guest WHERE encryptedEmail = :encryptedEmail AND clientId = :clientId AND isActive = true",
+        { params: { encryptedEmail: encryptedEmailToCheck, clientId } }
+      );
+
+      let guestId;
+      let credentials;
+
+      if (existingGuest.length > 0) {
+        // Update existing guest access period
+        guestId = existingGuest[0].guestId;
+        const newExpirationDate = new Date(
+          Date.now() + expirationDays * 24 * 60 * 60 * 1000
+        ).toISOString();
+
+        await db.query(
+          `
+          UPDATE Guest SET 
+          expiresAt = :expiresAt
+          WHERE guestId = :guestId
+        `,
+          {
+            params: {
+              expiresAt: newExpirationDate,
+              guestId: guestId,
+            },
+          }
+        );
+
+        credentials = {
+          username: existingGuest[0].username,
+          password: "existing_account", // Don't regenerate password for existing guests
+          expiresAt: newExpirationDate,
+        };
+      } else {
+        // Generate credentials for new guest
+        const username = this.userCredentials.generateUserCode();
+        const password = await this.userCredentials.generateSecurePassword(10);
+        const hashedPassword = await bcrypt.hash(password, 12);
+        const encryptedEmail = this.encryption.encryptSimple(email);
+        const expirationDate = new Date(
+          Date.now() + expirationDays * 24 * 60 * 60 * 1000
+        ).toISOString();
+
+        // Create guest - IMPORTANT: We do NOT store the plain email for privacy
+        const result = await db.query(
+          `
+          INSERT INTO Guest SET 
+          username = :username,
+          encryptedEmail = :encryptedEmail,
+          password = :password,
+          guestName = :guestName,
+          role = 'guest',
+          clientId = :clientId,
+          createdAt = :createdAt,
+          expiresAt = :expiresAt,
+          isActive = true
+        `,
+          {
+            params: {
+              username: username,
+              encryptedEmail: encryptedEmail,
+              password: hashedPassword,
+              guestName: guestName,
+              clientId: clientId,
+              createdAt: new Date().toISOString(),
+              expiresAt: expirationDate,
+            },
+          }
+        );
+
+        guestId = result[0].guestId;
+        credentials = {
+          username: username,
+          password: password,
+          expiresAt: expirationDate,
+        };
+      }
+
+      // Create or update guest access
+      const existingAccess = await db.query(
+        "SELECT FROM GuestAccess WHERE guestId = :guestId AND sharedBy = :clientId",
+        { params: { guestId, clientId } }
+      );
+
+      if (existingAccess.length > 0) {
+        // Update existing access
+        await db.query(
+          `
+          UPDATE GuestAccess SET 
+          photoIds = :photoIds,
+          sharedAt = :sharedAt,
+          expiresAt = :expiresAt,
+          isActive = true
+          WHERE guestId = :guestId AND sharedBy = :clientId
+        `,
+          {
+            params: {
+              photoIds: photoIds,
+              sharedAt: new Date().toISOString(),
+              expiresAt: new Date(
+                Date.now() + expirationDays * 24 * 60 * 60 * 1000
+              ).toISOString(),
+              guestId: guestId,
+              clientId: clientId,
+            },
+          }
+        );
+      } else {
+        // Create new access
+        await db.query(
+          `
+          INSERT INTO GuestAccess SET 
+          guestId = :guestId,
+          photoIds = :photoIds,
+          sharedBy = :clientId,
+          sharedAt = :sharedAt,
+          expiresAt = :expiresAt,
+          accessCount = 0,
+          maxAccessCount = 100,
+          isActive = true
+        `,
+          {
+            params: {
+              guestId: guestId,
+              photoIds: photoIds,
+              clientId: clientId,
+              sharedAt: new Date().toISOString(),
+              expiresAt: new Date(
+                Date.now() + expirationDays * 24 * 60 * 60 * 1000
+              ).toISOString(),
+            },
+          }
+        );
+      }
+
+      // Get client info for email
+      const clientInfo = await db.query(
+        "SELECT clientName FROM Client WHERE clientId = :clientId",
+        { params: { clientId: clientId } }
+      );
+
+      // Send credentials via email (email NOT stored in database)
+      if (credentials.password !== "existing_account") {
+        const emailResult = await this.emailService.sendGuestCredentials(
+          email, // This email is only used for sending, not stored
+          {
+            username: credentials.username,
+            password: credentials.password,
+            expiresAt: credentials.expiresAt,
+          },
+          clientInfo[0] || { clientName: "Client" },
+          photoIds.length
+        );
+      }
+
+      res.status(201).json({
+        success: true,
+        message:
+          "Guest access created successfully and credentials sent via email",
+        guest: {
+          id: guestId,
+          username: credentials.username,
+          guestName: guestName,
+          sharedPhotoCount: photoIds.length,
+          expiresIn: `${expirationDays} days`,
+          // Email not included in response for privacy
+          emailSent: credentials.password !== "existing_account",
+        },
+        credentials:
+          credentials.password !== "existing_account"
+            ? {
+                username: credentials.username,
+                password: credentials.password,
+              }
+            : {
+                message:
+                  "Guest already exists, existing credentials will be used",
+              },
+      });
+    } catch (error) {
+      console.error("Create guest error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to create guest access",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  // Get all collections shared with this client
+  async getSharedCollections(req, res) {
+    const db = this.dbInstance.useDatabase(
+      process.env.DB_NAME,
+      process.env.DB_USERNAME,
+      process.env.DB_PASSWORD
+    );
+
+    try {
+      const clientId = req.user.id;
+
+      // Find all unique collections that have photos shared with this client via PhotoAccess edges
+      const query = `
+        SELECT DISTINCT 
+          out('BelongsToCollection').collectionId as collectionId,
+          out('BelongsToCollection').name as name,
+          out('BelongsToCollection').description as description,
+          out('BelongsToCollection').createdAt as createdAt
+        FROM PhotoAccess 
+        WHERE in = :clientId 
+          AND out('BelongsToCollection') IS NOT NULL
+          AND out('BelongsToCollection').isActive = true
+      `;
+
+      let collections = await db.query(query, { clientId });
+
+      // Remove duplicate collections and get photo counts
+      const uniqueCollections = [];
+      const seenIds = new Set();
+
+      for (const collection of collections) {
+        if (
+          !collection.collectionId ||
+          seenIds.has(collection.collectionId.toString())
+        ) {
+          continue;
+        }
+
+        seenIds.add(collection.collectionId.toString());
+
+        // Count photos in this collection that the client has access to
+        const photoCountQuery = `
+          SELECT count(*) as count 
+          FROM PhotoAccess 
+          WHERE in = :clientId 
+            AND out.collectionId = :collectionId 
+            AND out.isActive = true
+        `;
+
+        const photoCountResult = await db.query(photoCountQuery, {
+          clientId,
+          collectionId: collection.collectionId,
+        });
+
+        uniqueCollections.push({
+          id: collection.collectionId,
+          name: collection.name,
+          description: collection.description,
+          createdAt: collection.createdAt,
+          photoCount: photoCountResult[0]?.count || 0,
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        collections: uniqueCollections,
+      });
+    } catch (error) {
+      console.error("Get shared collections error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to retrieve shared collections",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+
+  // Get all photos from a specific collection that the client has access to
+  async getCollectionPhotos(req, res) {
+    const db = this.dbInstance.useDatabase(
+      process.env.DB_NAME,
+      process.env.DB_USERNAME,
+      process.env.DB_PASSWORD
+    );
+
+    try {
+      const clientId = req.user.id;
+      const { collectionId } = req.params;
+
+      // Verify client has access to this collection and get photos
+      const query = `
+        SELECT 
+          out.clientId as id,
+          out.filename as filename,
+          out.originalName as originalName,
+          out.size as size,
+          out.width as width,
+          out.height as height,
+          out.uploadedAt as uploadedAt,
+          out.tags as tags,
+          out.thumbnailDataB64 as thumbnailDataB64
+        FROM PhotoAccess 
+        WHERE in = :clientId 
+          AND out.collectionId = :collectionId
+          AND out.isActive = true
+        ORDER BY out.uploadedAt DESC
+      `;
+
+      const photos = await db.query(query, { clientId, collectionId });
+
+      res.status(200).json({
+        success: true,
+        photos: photos.map((p) => ({
+          id: p.id,
+          filename: p.filename,
+          originalName: p.originalName,
+          size: p.size,
+          width: p.width,
+          height: p.height,
+          uploadedAt: p.uploadedAt,
+          tags: p.tags,
+          thumbnailDataB64: p.thumbnailDataB64,
+        })),
+      });
+    } catch (error) {
+      console.error("Get collection photos error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to retrieve collection photos",
+      });
+    } finally {
+      this.dbInstance.closeConnection();
+    }
+  }
+}
+
+module.exports = ClientService;
