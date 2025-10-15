@@ -1,10 +1,13 @@
 require("dotenv").config();
 const axios = require("axios");
 
-const BASE_URL = "http://localhost:9001/api";
+const PORT = process.env.PORT || 6002;
+const PROTOCOL = process.env.USE_HTTPS === "true" ? "https" : "http";
+const BASE_URL = `${PROTOCOL}://localhost:${PORT}/api`;
 
 async function testSystem() {
-  console.log("🧪 Testing Multi-Tier Photo Sharing System\n");
+  console.log("🧪 Testing Multi-Tier Photo Sharing System");
+  console.log(`📍 Using API: ${BASE_URL}\n`);
 
   try {
     // Test 1: Admin Login

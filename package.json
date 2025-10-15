@@ -14,7 +14,8 @@
     "init-db-complete": "node scripts/initDbComplete.js",
     "test-auth": "node scripts/testAuth.js",
     "cleanup-collections": "node scripts/cleanupCollections.js",
-    "cleanup-tokens": "node scripts/cleanupTokens.js"
+    "cleanup-tokens": "node scripts/cleanupTokens.js",
+    "generate-cert": "node scripts/generate-ssl-cert.js"
   },
   "dependencies": {
     "archiver": "^7.0.1",

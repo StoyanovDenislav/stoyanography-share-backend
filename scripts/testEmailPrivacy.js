@@ -1,10 +1,13 @@
 require("dotenv").config();
 const axios = require("axios");
 
-const BASE_URL = "http://localhost:9001/api";
+const PORT = process.env.PORT || 6002;
+const PROTOCOL = process.env.USE_HTTPS === "true" ? "https" : "http";
+const BASE_URL = `${PROTOCOL}://localhost:${PORT}/api`;
 
 async function testEmailPrivacySystem() {
-  console.log("🔒 Testing Email Privacy System\n");
+  console.log("🔒 Testing Email Privacy System");
+  console.log(`📍 Using API: ${BASE_URL}\n`);
 
   try {
     // Test 1: Admin Login
@@ -111,7 +114,7 @@ async function testEmailPrivacySystem() {
   } catch (error) {
     console.error("\n❌ Test failed:", error.response?.data || error.message);
     if (error.code === "ECONNREFUSED") {
-      console.log("\n💡 Make sure the server is running on port 9001");
+      console.log(`\n💡 Make sure the server is running on port ${PORT}`);
       console.log("   Run: npm run dev");
     }
   }

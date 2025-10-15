@@ -77,7 +77,7 @@ class EmailService {
           <p><strong>Username:</strong> ${credentials.username}</p>
           <p><strong>Password:</strong> ${credentials.password}</p>
           <p><strong>Login URL:</strong> ${
-            process.env.FRONTEND_URL || "http://localhost:3000"
+            process.env.FRONTEND_URL || "http://localhost:3001"
           }/login</p>
         </div>
         
@@ -104,7 +104,7 @@ You have been invited by ${
 Your Login Credentials:
 Username: ${credentials.username}
 Password: ${credentials.password}
-Login URL: ${process.env.FRONTEND_URL || "http://localhost:3000"}/login
+Login URL: ${process.env.FRONTEND_URL || "http://localhost:3001"}/login
 
 Important Security Notes:
 - Please change your password after your first login
@@ -149,7 +149,7 @@ Stoyanography Share Team
           <p><strong>Username:</strong> ${credentials.username}</p>
           <p><strong>Password:</strong> ${credentials.password}</p>
           <p><strong>Login URL:</strong> ${
-            process.env.FRONTEND_URL || "http://localhost:3000"
+            process.env.FRONTEND_URL || "http://localhost:3001"
           }/login</p>
           <p><strong>Access Expires:</strong> ${new Date(
             credentials.expiresAt
@@ -177,7 +177,7 @@ You have been invited by ${
 Your Temporary Access Credentials:
 Username: ${credentials.username}
 Password: ${credentials.password}
-Login URL: ${process.env.FRONTEND_URL || "http://localhost:3000"}/login
+Login URL: ${process.env.FRONTEND_URL || "http://localhost:3001"}/login
 Access Expires: ${new Date(credentials.expiresAt).toLocaleDateString()}
 
 Important Notes:
@@ -229,7 +229,7 @@ Stoyanography Share Team
           <p><strong>Username:</strong> ${credentials.username}</p>
           <p><strong>Password:</strong> ${credentials.password}</p>
           <p><strong>Login URL:</strong> ${
-            process.env.FRONTEND_URL || "http://localhost:3000"
+            process.env.FRONTEND_URL || "http://localhost:3001"
           }</p>
         </div>
         
@@ -263,7 +263,7 @@ Your Login Credentials:
 Business Name: ${credentials.businessName}
 Username: ${credentials.username}
 Password: ${credentials.password}
-Login URL: ${process.env.FRONTEND_URL || "http://localhost:3000"}
+Login URL: ${process.env.FRONTEND_URL || "http://localhost:3001"}
 
 What you can do:
 - Upload and manage photos
@@ -337,7 +337,7 @@ Stoyanography Share Team
         
         <p style="margin: 30px 0;">
           <a href="${
-            process.env.FRONTEND_URL || "http://localhost:3000"
+            process.env.FRONTEND_URL || "http://localhost:3001"
           }/login" 
              style="background-color: #0ea5a4; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
             View Collection
@@ -379,7 +379,7 @@ ${
 - Photos: ${collectionInfo.photoCount || 0}
 - Auto-deletes in: ${collectionInfo.daysRemaining || 14} days
 
-Login to view: ${process.env.FRONTEND_URL || "http://localhost:3000"}/login
+Login to view: ${process.env.FRONTEND_URL || "http://localhost:3001"}/login
 
 What you can do:
 - View all photos in this collection

@@ -11,32 +11,62 @@ const CleanupService = require("./services/cleanupService");
 const { startCleanupCron } = require("./cleanupCron");
 
 const app = express();
-const PORT = process.env.PORT || 9001;
+const PORT = process.env.PORT || 6002;
 
 // Security middleware
 app.use(helmet());
 
+app.use((req, res, next) => {
+  console.log(`Incoming request: ${req.method} ${req.url}`);
+  next();
+});
 // CORS configuration
-app.use(
-  cors({
-    origin:
-      process.env.NODE_ENV === "production"
-        ? ["https://yourdomain.com"] // Replace with your frontend domain
-        : [
-            "http://localhost:3000",
-            "http://localhost:3001",
-            "http://127.0.0.1:3000",
-            "http://192.168.0.106:3000", // Your network IP
-            /^http:\/\/192\.168\.\d{1,3}\.\d{1,3}:3000$/, // Allow any 192.168.x.x IP
-          ],
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+app.use((req, res, next) => {
+  const allowedOrigins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "https://localhost:3001",
+    "https://share.stoyanography.com",
+    "https://api.share.stoyanography.com",
+    "https://*.stoyanography.com",
+  ];
+  const origin = req.get("Origin");
+
+  console.log("🌐 CORS Origin:", origin);
+
+  const isAllowed = allowedOrigins.some((allowed) => {
+    const regex = new RegExp(
+      `^${allowed.replace(/\*/g, ".*").replace(/\//g, "\\/")}\\/?$`
+    );
+    const result = regex.test(origin);
+    console.log(`   Testing ${origin} against ${allowed}: ${result}`);
+    return result;
+  });
+
+  if (origin && isAllowed) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, HEAD, OPTIONS, POST, PUT, DELETE, PATCH"
+    );
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Access-Control-Allow-Headers, Origin, Accept, X-Requested-With, Content-Type, Access-Control-Request-Method, Access-Control-Request-Headers, Authorization"
+    );
+  }
+
+  // Handle preflight requests
+  if (req.method === "OPTIONS") {
+    console.log("   ✅ Preflight request handled");
+    return res.status(204).end();
+  }
+
+  next();
+});
 
 // Rate limiting
-/*const limiter = rateLimit({
+const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // Limit each IP to 100 requests per windowMs
   message: {
@@ -55,7 +85,7 @@ const authLimiter = rateLimit({
 });
 
 app.use(limiter);
-app.use("/api/auth", authLimiter);*/
+app.use("/api/auth", authLimiter);
 
 // Body parsing middleware
 app.use(express.json({ limit: "10mb" }));
@@ -87,20 +117,57 @@ app.use("*", (req, res) => {
 });
 
 const http = require("http");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
 
-// Create HTTP server with increased header size limit
-const server = http.createServer(
-  {
-    maxHeaderSize: 16384, // 16KB (default is 8KB)
-  },
-  app
-);
+// HTTPS configuration
+let server;
+const USE_HTTPS = process.env.USE_HTTPS === "true";
 
-server.listen(PORT, "0.0.0.0", async (error) => {
+if (USE_HTTPS) {
+  try {
+    // In production, use proper SSL certificates
+    // In development, use self-signed certificates
+    const certPath =
+      process.env.NODE_ENV === "production"
+        ? {
+            key: process.env.SSL_KEY_PATH || "/etc/ssl/private/key.pem",
+            cert: process.env.SSL_CERT_PATH || "/etc/ssl/certs/cert.pem",
+          }
+        : {
+            key: path.join(__dirname, "ssl", "key.pem"),
+            cert: path.join(__dirname, "ssl", "cert.pem"),
+          };
+
+    const httpsOptions = {
+      key: fs.readFileSync(certPath.key),
+      cert: fs.readFileSync(certPath.cert),
+      maxHeaderSize: 16384, // 16KB (default is 8KB)
+    };
+
+    server = https.createServer(httpsOptions, app);
+    console.log("🔒 HTTPS enabled");
+  } catch (error) {
+    console.error(
+      "❌ SSL certificate error:",
+      error.message,
+      "\nFalling back to HTTP. Run 'npm run generate-cert' to create self-signed certificates for development."
+    );
+    server = http.createServer({ maxHeaderSize: 16384 }, app);
+  }
+} else {
+  // Create HTTP server with increased header size limit
+  server = http.createServer({ maxHeaderSize: 16384 }, app);
+  console.log("ℹ️  HTTP mode (set USE_HTTPS=true in .env to enable HTTPS)");
+}
+
+server.listen(PORT, async (error) => {
   if (!error) {
+    const protocol = USE_HTTPS ? "https" : "http";
     console.log(`Server is running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV}`);
-    console.log(`Server accessible at: http://localhost:${PORT}`);
+    console.log(`Server accessible at: ${protocol}://localhost:${PORT}`);
 
     // Test database connection
     try {

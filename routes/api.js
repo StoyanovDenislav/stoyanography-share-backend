@@ -7,6 +7,7 @@ const guestRoutes = require("./guest");
 const photoRoutes = require("./photos");
 const collectionRoutes = require("./collections");
 const { authenticateToken } = require("../middleware/auth");
+const eventEmitter = require("../services/eventEmitterService");
 
 const router = express.Router();
 
@@ -31,6 +32,22 @@ router.use("/photos", photoRoutes);
 // Collection routes (photographer and client)
 router.use("/", collectionRoutes);
 
+// Server-Sent Events endpoint for real-time updates
+router.get("/events", authenticateToken, (req, res) => {
+  // Set headers for SSE
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
+
+  const { role, userId } = req.user;
+  
+  // Add client to event emitter
+  eventEmitter.addClient(res, role, userId);
+  
+  console.log(`📡 SSE connection established for ${role}: ${userId}`);
+});
+
 // Protected API routes
 router.get("/protected", authenticateToken, (req, res) => {
   res.json({
@@ -46,6 +63,7 @@ router.get("/health", (req, res) => {
     success: true,
     message: "API is working",
     timestamp: new Date().toISOString(),
+    sseConnections: eventEmitter.getStats(),
   });
 });
 
