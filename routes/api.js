@@ -41,10 +41,10 @@ router.get("/events", authenticateToken, (req, res) => {
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
 
   const { role, userId } = req.user;
-  
+
   // Add client to event emitter
   eventEmitter.addClient(res, role, userId);
-  
+
   console.log(`📡 SSE connection established for ${role}: ${userId}`);
 });
 
