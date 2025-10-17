@@ -156,29 +156,18 @@ class AuthService {
         }
       }
 
-      // Try Guest class if not found
-      if (!user) {
-        // Format current date for OrientDB comparison
-        const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-        users = await db.query(
-          "SELECT FROM Guest WHERE username = :username AND isActive = true AND expiresAt > date(:now, 'yyyy-MM-dd HH:mm:ss')",
-          {
-            params: {
-              username,
-              now: now,
-            },
-          }
-        );
-        if (users.length > 0) {
-          user = users[0];
-          userClass = "Guest";
-          console.log("👤 Found guest user:", {
-            username: user.username,
-            expiresAt: user.expiresAt,
-            isActive: user.isActive,
-          });
-        }
-      }
+      // Guest authentication DISABLED
+      // if (!user) {
+      //   const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+      //   users = await db.query(
+      //     "SELECT FROM Guest WHERE username = :username AND isActive = true AND expiresAt > date(:now, 'yyyy-MM-dd HH:mm:ss')",
+      //     { params: { username, now: now } }
+      //   );
+      //   if (users.length > 0) {
+      //     user = users[0];
+      //     userClass = "Guest";
+      //   }
+      // }
 
       if (!user) {
         throw new Error("Invalid credentials");
@@ -346,10 +335,11 @@ class AuthService {
         if (user.clientId) tokenPayload.clientId = user.clientId;
       }
 
-      if (user.role === "guest") {
-        if (user.guestName) tokenPayload.guestName = user.guestName;
-        if (user.expiresAt) tokenPayload.expiresAt = user.expiresAt;
-      }
+      // Guest role disabled
+      // if (user.role === "guest") {
+      //   if (user.guestName) tokenPayload.guestName = user.guestName;
+      //   if (user.expiresAt) tokenPayload.expiresAt = user.expiresAt;
+      // }
 
       const token = generateToken(tokenPayload);
 

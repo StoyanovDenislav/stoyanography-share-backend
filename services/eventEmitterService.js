@@ -40,6 +40,7 @@ class EventEmitterService {
     });
 
     // Keep connection alive with periodic pings
+    // NOTE: 30-45 seconds is optimal - browsers timeout SSE after ~60s of inactivity
     const pingInterval = setInterval(() => {
       if (!client.res.writableEnded) {
         client.lastPing = Date.now();
@@ -47,7 +48,7 @@ class EventEmitterService {
       } else {
         clearInterval(pingInterval);
       }
-    }, 30000); // Ping every 30 seconds
+    }, 45 * 1000); // Ping every 45 seconds (safe margin before 60s browser timeout)
 
     // Clean up on disconnect
     res.on("close", () => {
@@ -75,6 +76,11 @@ class EventEmitterService {
     if (!client.res.writableEnded) {
       try {
         client.res.write(`data: ${JSON.stringify(data)}\n\n`);
+        // CRITICAL: Flush the response to ensure data is sent immediately
+        // Without this, the connection may appear idle and close
+        if (typeof client.res.flush === "function") {
+          client.res.flush();
+        }
       } catch (error) {
         console.error(`Failed to send to client ${client.id}:`, error.message);
       }
