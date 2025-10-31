@@ -23,9 +23,9 @@ app.use((req, res, next) => {
 // CORS configuration
 app.use((req, res, next) => {
   const allowedOrigins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://localhost:3001",
+    "http://localhost:4000",
+    "http://localhost:4001",
+    "https://localhost:4001",
     "https://share.stoyanography.com",
     "https://api.share.stoyanography.com",
     "https://*.stoyanography.com",
@@ -88,8 +88,8 @@ app.use(limiter);
 app.use("/api/auth", authLimiter);
 
 // Body parsing middleware
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(express.json({ limit: "10000mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10000mb" }));
 app.use(cookieParser());
 
 // API routes
